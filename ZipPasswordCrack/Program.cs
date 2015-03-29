@@ -123,8 +123,8 @@ namespace ZipPasswordCrack
                     if (!silent)
                     {
                         Console.WriteLine();
-                        Console.WriteLine("Success! Password is {0}.", currentPassword);
                     }
+                    Console.WriteLine("Success! Password is {0}.", currentPassword);
                 }
                 catch (BadPasswordException)
                 {
