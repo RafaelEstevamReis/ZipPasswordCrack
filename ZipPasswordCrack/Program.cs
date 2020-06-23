@@ -6,6 +6,8 @@ using System.Text;
 using Ionic.Zip;
 using Ionic.Zlib;
 using System.Runtime.CompilerServices;
+using System.Threading;
+using System.Collections.Concurrent;
 
 namespace ZipPasswordCrack
 {
@@ -17,7 +19,10 @@ namespace ZipPasswordCrack
         private static bool silent = false;
         private static string charSpace = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789./"; // Base64
         private static int maxPasswordLen = 10;
+        private static int minPasswordLen = 5;
         #endregion
+
+        static ConcurrentQueue<string> queue = new ConcurrentQueue<string>();
 
         #region Main
 
@@ -27,10 +32,12 @@ namespace ZipPasswordCrack
             args = new string[] { "-v", "ZIP_FILE.ZIP", "OUT" };
             App(args);
 #else
+            args = new string[] { "-v", "ZIP_FILE.ZIP", "OUT" };
             App(args);
 #endif
         }
-
+        static string file;
+        static string outDir;
         static void App(string[] args)
         {
             if (args.Length < 2)
@@ -59,20 +66,24 @@ namespace ZipPasswordCrack
                 }
             }
 
-            string file = args[args.Length - 2];
-            string outDir = args[args.Length - 1];
+            file = args[args.Length - 2];
+            outDir = args[args.Length - 1];
             if (verboseOutput)
             {
                 Console.WriteLine("Input file is {0}.", file);
                 Console.WriteLine("Output dir is {0}.", outDir);
             }
 
-            CrackPassword(file, outDir);
+            CrackPassword();
         }
         #endregion
 
         #region Static methods
-        private static void CrackPassword(string file, string outDir)
+        static bool found = false;
+        static int passwordsTested = 0;
+        static string lastPwd = "";
+        static object lockObj = new object();
+        private static void CrackPassword()
         {
             if (!ZipFile.IsZipFile(file))
             {
@@ -80,112 +91,130 @@ namespace ZipPasswordCrack
                 return;
             }
 
-            DateTime start = DateTime.Now;
-            int currSecond = 60;
-            double passwordsTested = 0;
-            double oldPwPerS = 0;
+            var thdPasswordPump = new Thread(passwordsPump);
+            thdPasswordPump.Start();
 
-            for (int pwdlen = 1; pwdlen <= maxPasswordLen; pwdlen++)
+            Thread[] arrThreads = new Thread[4];
+            for (int i = 0; i < arrThreads.Length; i++)
             {
-                foreach (string currentPassword in GetCombinations(getChars(charSpace), pwdlen))
+                arrThreads[i] = new Thread(threadProcessPasswords);
+                arrThreads[i].Start(i);
+            }
+
+            int lastCount = 0;
+            while (!found)
+            {
+                Thread.Sleep(1000);
+
+                int diff = passwordsTested - lastCount;
+                lastCount = passwordsTested;
+
+                Console.CursorLeft = 0;
+                if (Console.CursorTop != 0)
+                    Console.CursorTop--;
+
+                Console.Write("Testing password length: {0} [{1} passwords/seconds].\nCurrent password: {2}", lastPwd.Length, diff, lastPwd);
+            }
+            Console.ReadKey();
+        }
+        private static void threadProcessPasswords(object obj)
+        {
+            while (!found)
+            {
+                string pass;
+                if (queue.TryDequeue(out pass))
                 {
-                    ZipFile zFile = new ZipFile(file);
-                    passwordsTested++;
-                    zFile.Password = currentPassword;
+                    DirectoryInfo di = new DirectoryInfo(outDir);
+                    var d2 = di.CreateSubdirectory("thd" + obj.ToString());
 
-                    try
-                    {
-                        DateTime current = DateTime.Now;
-                        TimeSpan ts = current.Subtract(start);
-                        double pwPerS = 0;
-                        if (ts.Seconds > 0)
-                            pwPerS = passwordsTested / ts.TotalSeconds;
+                    lastPwd = pass;
+                    tryOnePassword(pass, (int)obj);
+                }
+                else
+                {
+                    Thread.Sleep(10);
+                }
+            }
 
-                        // Test each password.
-                        if (!silent)
-                        {
-                            if (!verboseOutput)
-                            {
-                                if ((currentPWLenght != currentPassword.Length) || (oldPwPerS != pwPerS))
-                                {
-                                    if (currSecond != DateTime.Now.Second)
-                                    {
-                                        currSecond = DateTime.Now.Second;
-                                        currentPWLenght = currentPassword.Length;
-                                        oldPwPerS = pwPerS;
-                                        Console.CursorLeft = 0;
-                                        if (pwPerS > 0)
-                                            Console.Write("Testing password length: {0} [{1} passwords/seconds]", currentPWLenght, (int)pwPerS);
-                                        else
-                                            Console.Write("Testing password length: {0}", currentPWLenght);
-                                    }
-                                }
-                            }
-                            else
-                            {
-                                if (currSecond != DateTime.Now.Second)
-                                {
-                                    currSecond = DateTime.Now.Second;
-                                    currentPWLenght = currentPassword.Length;
-                                    oldPwPerS = pwPerS;
-                                    Console.CursorLeft = 0;
-                                    if (Console.CursorTop != 0)
-                                        Console.CursorTop--;
+        }
 
-                                    if (pwPerS > 0)
-                                        Console.Write("Testing password length: {0} [{1} passwords/seconds].\nCurrent password: {2}", currentPWLenght, (int)pwPerS, currentPassword);
-                                    else
-                                        Console.Write("Testing password length: {0}.\nCurrent password: {1}", currentPWLenght, currentPassword);
-                                }
-                            }
-                        }
+        private static void tryOnePassword(string currentPassword, int threadID)
+        {
+            ZipFile zFile = new ZipFile(file);
+            Interlocked.Increment(ref passwordsTested);
+            zFile.Password = currentPassword;
 
-                        zFile.ExtractAll(outDir, ExtractExistingFileAction.OverwriteSilently);
-                        // Not thrown
-                        if (!silent)
-                        {
-                            Console.WriteLine();
-                        }
-                        Console.WriteLine("Success! Password is {0}.", currentPassword);
-                        break;
+            try
+            {
+                string dir = outDir + "/" + "thd" + threadID;
+                zFile.ExtractAll(dir, ExtractExistingFileAction.OverwriteSilently);
+                // Not thrown
+                if (!silent)
+                {
+                    Console.WriteLine();
+                }
+                Console.WriteLine("Success! Password is {0}.", currentPassword);
 
-                    }
-                    catch (BadPasswordException)
+                lock (lockObj)
+                {
+                    File.AppendText(string.Format("Success! Password is {0}\n", currentPassword));
+                }
+
+                found = true;
+                return;
+            }
+            catch (BadPasswordException)
+            {
+                // Ignore this error
+            }
+            catch (BadCrcException)
+            {
+                // Ignore this error
+            }
+            catch (ZlibException)
+            {
+                // Ignore this error
+            }
+            catch (BadReadException)
+            {
+                // Ignore this error
+            }
+            catch (BadStateException)
+            {
+                // Ignore this error
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine();
+                Console.WriteLine("Error: {0}", e.ToString());
+                Console.WriteLine("Can't continue.");
+
+                found = true;
+            }
+            finally
+            {
+              //  // Remove tmp files, they will block decryption progress
+              //  string[] files = Directory.GetFiles(outDir, "*.tmp");
+              //  if (files.Count() > 0)
+              //  {
+              //      foreach (string f in files)
+              //          File.Delete(f);
+              //  }
+            }
+        }
+
+        private static void passwordsPump(object obj)
+        {
+            while (!found)
+            {
+                for (int pwdlen = minPasswordLen; pwdlen <= maxPasswordLen; pwdlen++)
+                {
+                    foreach (string currentPassword in GetCombinations(getChars(charSpace), pwdlen))
                     {
-                        // Ignore this error
-                    }
-                    catch (BadCrcException)
-                    {
-                        // Ignore this error
-                    }
-                    catch (ZlibException)
-                    {
-                        // Ignore this error
-                    }
-                    catch (BadReadException)
-                    {
-                        // Ignore this error
-                    }
-                    catch (BadStateException)
-                    {
-                        // Ignore this error
-                    }
-                    catch (Exception e)
-                    {
-                        Console.WriteLine();
-                        Console.WriteLine("Error: {0}", e.ToString());
-                        Console.WriteLine("Can't continue.");
-                        break;
-                    }
-                    finally
-                    {
-                        // Remove tmp files, they will block decryption progress
-                        string[] files = Directory.GetFiles(outDir, "*.tmp");
-                        if (files.Count() > 0)
-                        {
-                            foreach (string f in files)
-                                File.Delete(f);
-                        }
+                        if (found) return;
+
+                        if (queue.Count > 100000) Thread.Sleep(10);
+                        queue.Enqueue(currentPassword);
                     }
                 }
             }
