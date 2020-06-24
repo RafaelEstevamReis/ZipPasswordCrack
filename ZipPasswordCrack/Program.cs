@@ -29,15 +29,13 @@ namespace ZipPasswordCrack
         static void Main(string[] args)
         {
 #if DEBUG
-            args = new string[] { "-v", "ZIP_FILE.ZIP", "OUT" };
-            App(args);
-#else
-            args = new string[] { "-v", "ZIP_FILE.ZIP", "OUT" };
-            App(args);
+            args = new string[] { "-v", "-d=refStrings.txt", "ZIP_FILE.ZIP", "OUT" };
 #endif
+            App(args);
         }
         static string file;
         static string outDir;
+        static string inDict;
         static void App(string[] args)
         {
             if (args.Length < 2)
@@ -46,6 +44,7 @@ namespace ZipPasswordCrack
                 Console.WriteLine("Options");
                 Console.WriteLine("  -v\t\tVerbose console ouput.");
                 Console.WriteLine("  -s\t\tSilent. No console output.");
+                Console.WriteLine("  -d=FILE\t\tDictionary file");
                 Console.WriteLine("  Default\tSome console output.");
                 return;
             }
@@ -58,6 +57,8 @@ namespace ZipPasswordCrack
                         verboseOutput = true;
                     else if (args[i] == "-s")
                         silent = true;
+                    else if (args[i].StartsWith("-d"))
+                        inDict = args[i].Split('=')[1];
                     else
                     {
                         Console.WriteLine("Error: unknown option '{0}'", args[i]);
@@ -113,7 +114,7 @@ namespace ZipPasswordCrack
                 if (Console.CursorTop != 0)
                     Console.CursorTop--;
 
-                Console.Write("Testing password length: {0} [{1} passwords/seconds].\nCurrent password: {2}", lastPwd.Length, diff, lastPwd);
+                Console.Write("Testing password length: {0} [{1} passwords/seconds].      \nCurrent password: {2}                 ", lastPwd.Length, diff, lastPwd);
             }
             Console.ReadKey();
         }
@@ -205,19 +206,35 @@ namespace ZipPasswordCrack
 
         private static void passwordsPump(object obj)
         {
+            StreamReader fs = null;
+            if (inDict != null) fs = File.OpenText(inDict);
+
             while (!found)
             {
-                for (int pwdlen = minPasswordLen; pwdlen <= maxPasswordLen; pwdlen++)
+                if (fs == null)
                 {
-                    foreach (string currentPassword in GetCombinations(getChars(charSpace), pwdlen))
+                    for (int pwdlen = minPasswordLen; pwdlen <= maxPasswordLen; pwdlen++)
                     {
-                        if (found) return;
+                        foreach (string currentPassword in GetCombinations(getChars(charSpace), pwdlen))
+                        {
+                            if (found) return;
 
+                            if (queue.Count > 100000) Thread.Sleep(10);
+                            queue.Enqueue(currentPassword);
+                        }
+                    }
+                }
+                else
+                {
+                    string line;
+                    while ((line = fs.ReadLine()) != null)
+                    {
                         if (queue.Count > 100000) Thread.Sleep(10);
-                        queue.Enqueue(currentPassword);
+                        queue.Enqueue(line);
                     }
                 }
             }
+            if (fs != null) fs.Dispose();
         }
 
         private static IEnumerable<string> getChars(string Chars)
